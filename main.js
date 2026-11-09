@@ -99,9 +99,19 @@ function setupAutoUpdater() {
   autoUpdater.on('error', err => server.setUpdateStatus('error:' + (err.message || 'desconocido')));
 
   // El servidor expone rutas que la web llama para disparar estas acciones.
-  server.onCheckForUpdates(() => autoUpdater.checkForUpdates().catch(() => {}));
-  server.onDownloadUpdate(() => autoUpdater.downloadUpdate().catch(() => {}));
-  server.onInstallUpdate(() => autoUpdater.quitAndInstall());
+  // Si checkForUpdates/downloadUpdate rechazan la promesa ANTES de llegar
+  // a disparar sus propios eventos (pasa, por ejemplo, corriendo sin
+  // empaquetar como ahora, o sin conexión a GitHub), hay que reportar el
+  // error igual - si no, el banner de la web queda trabado para siempre
+  // en "Buscando actualizaciones...".
+  const reportarError = err => server.setUpdateStatus('error:' + (err && err.message ? err.message : 'desconocido'));
+  server.onCheckForUpdates(() => autoUpdater.checkForUpdates().catch(reportarError));
+  server.onDownloadUpdate(() => autoUpdater.downloadUpdate().catch(reportarError));
+  // isSilent=true: no muestra el asistente NSIS (nada que el encargado
+  // tenga que clickear). isForceRunAfter=true: vuelve a abrir el programa
+  // solo despues de instalar (lo cual dispara el shell.openExternal() de
+  // whenReady() de nuevo, abriendo una pestana nueva ya actualizada).
+  server.onInstallUpdate(() => autoUpdater.quitAndInstall(true, true));
 
   // Chequeo automático al iniciar, igual que antes.
   setTimeout(() => {

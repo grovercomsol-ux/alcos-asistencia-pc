@@ -678,10 +678,84 @@ async function registrarIndividual(id_persona) {
 }
 
 // ── Actualizaciones (electron-updater via servidor local) ────────────
+// Flujo: el encargado aprieta "Buscar actualizaciones" (menú ⚙) -> si hay
+// una version nueva, aparece el banner azul arriba con el boton
+// "Actualizar software" -> al apretarlo se descarga e instala sola, sin
+// pasos intermedios: la app se cierra, el instalador NSIS corre en
+// silencio, y electron-updater vuelve a abrir el programa solo (que a su
+// vez abre una pestaña nueva del navegador, ya actualizada). Esta pestaña
+// vieja se queda sin conexión en el momento en que el servidor local se
+// apaga para instalar — es esperable, no es un error.
+
+let updatePollTimer = null;
+let updateDescargando = false;
+
+function mostrarBannerUpdate(texto, mostrarBoton) {
+  document.getElementById('banner-update-text').textContent = texto;
+  document.getElementById('banner-update-btn').style.display = mostrarBoton ? 'inline-block' : 'none';
+  document.getElementById('banner-update').classList.remove('banner-update-hidden');
+}
+
+function ocultarBannerUpdate() {
+  document.getElementById('banner-update').classList.add('banner-update-hidden');
+}
+
+function detenerPollingUpdate() {
+  if (updatePollTimer) { clearInterval(updatePollTimer); updatePollTimer = null; }
+}
 
 async function buscarActualizaciones() {
-  toast('Buscando actualizaciones…');
-  await fetch('/api/update/check', { method: 'POST' });
+  updateDescargando = false;
+  mostrarBannerUpdate('🔄 Buscando actualizaciones…', false);
+  try { await fetch('/api/update/check', { method: 'POST' }); } catch {}
+  detenerPollingUpdate();
+  updatePollTimer = setInterval(pollUpdateStatus, 1500);
+  pollUpdateStatus();
+}
+
+async function pollUpdateStatus() {
+  let data;
+  try {
+    const res = await fetch('/api/update/status');
+    data = await res.json();
+  } catch {
+    return; // servidor local caido (justo instalando): no tocamos el banner
+  }
+
+  const status = data.status || 'idle';
+
+  if (status === 'checking') {
+    mostrarBannerUpdate('🔄 Buscando actualizaciones…', false);
+  } else if (status.startsWith('available:')) {
+    detenerPollingUpdate();
+    const version = status.split(':')[1];
+    mostrarBannerUpdate(`🆕 Hay una actualización disponible (v${version})`, true);
+  } else if (status === 'not-available') {
+    detenerPollingUpdate();
+    mostrarBannerUpdate('✓ Ya tenés la última versión.', false);
+    setTimeout(ocultarBannerUpdate, 4000);
+  } else if (status.startsWith('downloading:')) {
+    const pct = status.split(':')[1];
+    mostrarBannerUpdate(`⬇️ Descargando actualización… ${pct}%`, false);
+  } else if (status === 'downloaded') {
+    detenerPollingUpdate();
+    mostrarBannerUpdate('✅ Actualización descargada. Instalando y reiniciando…', false);
+    fetch('/api/update/install', { method: 'POST' }).catch(() => {});
+  } else if (status.startsWith('error:')) {
+    detenerPollingUpdate();
+    updateDescargando = false;
+    toast('⚠ Error con la actualización: ' + status.slice(6));
+    ocultarBannerUpdate();
+  }
+}
+
+async function instalarActualizacion() {
+  if (updateDescargando) return;
+  updateDescargando = true;
+  mostrarBannerUpdate('⬇️ Descargando actualización… 0%', false);
+  try { await fetch('/api/update/download', { method: 'POST' }); } catch {}
+  detenerPollingUpdate();
+  updatePollTimer = setInterval(pollUpdateStatus, 1200);
 }
 
 // ── Menu del engranaje (actualizar / cambiar encargado) ──────────────
@@ -1536,6 +1610,7 @@ async function init() {
   document.getElementById('search').addEventListener('click', mostrarDropdownAgregar);
   document.getElementById('btn-registrar').addEventListener('click', registrarSeleccionados);
   document.getElementById('btn-update').addEventListener('click', () => { cerrarHeaderMenu(); buscarActualizaciones(); });
+  document.getElementById('banner-update-btn').addEventListener('click', instalarActualizacion);
   document.getElementById('btn-sel-todo').addEventListener('click', seleccionarTodo);
   document.getElementById('btn-desel-todo').addEventListener('click', desmarcarTodo);
   document.getElementById('btn-aplicar-hora-grupo').addEventListener('click', aplicarHoraAGrupo);
