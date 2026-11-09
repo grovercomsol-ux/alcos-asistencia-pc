@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Alcos Asistencia PC</title>
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+
+  <div id="banner-offline" class="banner-offline-hidden"></div>
+
+  <div id="header">
+    <div>
+      <h1>Alcos Asistencia PC</h1>
+      <div id="header-sub">Cargando…</div>
+    </div>
+    <div id="header-menu-wrap">
+      <button id="btn-menu" class="btn-icon" title="Más opciones">⚙</button>
+      <div id="header-menu" class="header-menu-hidden">
+        <button id="btn-update" class="header-menu-item">🔄 Buscar actualizaciones</button>
+        <button id="btn-config" class="header-menu-item">👤 Cambiar encargado/secciones</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-nav">
+    <button class="tab-btn active" data-tab="registro" onclick="switchTab('registro')">📋 Registro</button>
+    <button class="tab-btn" data-tab="historial" onclick="switchTab('historial')">🗂 Historial</button>
+    <button class="tab-btn" data-tab="gantt" onclick="switchTab('gantt')">📊 Gantt</button>
+    <button class="tab-btn" data-tab="ocupacion" onclick="switchTab('ocupacion')">🏭 Ocupación</button>
+    <button class="tab-btn" data-tab="horas" onclick="switchTab('horas')">⏱ Horas-Persona</button>
+    <button id="btn-actualizar-todo" class="btn-icon-actualizar" onclick="actualizarTodo()" title="Actualizar datos">↻</button>
+  </div>
+
+  <div id="panel-registro" class="tab-panel">
+
+    <div id="toolbar">
+      <div id="search-wrap">
+        <input id="search" type="text" placeholder="🔍 Agregar personal a tu preselección…" autocomplete="off"/>
+        <div id="agregar-dropdown" class="agregar-dropdown-hidden"></div>
+      </div>
+      <span id="contador">0/0 seleccionados</span>
+      <button id="btn-registrar" class="btn btn-registrar">✅ Registrar seleccionados</button>
+    </div>
+
+    <div id="toolbar-row2">
+      <button id="btn-sel-todo" class="btn btn-outline">☑ Seleccionar todo</button>
+      <button id="btn-desel-todo" class="btn btn-outline">☐ Desmarcar todo</button>
+      <label for="hora-grupo">Hora para seleccionados:</label>
+      <input id="hora-grupo" type="time" step="60"/>
+      <button id="btn-aplicar-hora-grupo" class="btn btn-outline">Aplicar a seleccionados</button>
+    </div>
+
+    <div id="lista-cols-header">
+      <div class="lista-cols-spacer-check"></div>
+      <div class="lista-cols-spacer-nombre"></div>
+      <div class="lista-cols-compare-header">
+        <div class="lista-cols-compare-col">Estado actual</div>
+        <div class="lista-cols-compare-col">Próximo registro</div>
+      </div>
+      <div class="lista-cols-spacer-btn"></div>
+    </div>
+
+    <div id="lista">
+      <div id="empty">Cargando…</div>
+    </div>
+
+  </div>
+
+  <div id="panel-gantt" class="tab-panel tab-panel-hidden">
+    <div id="gantt-layout">
+      <div id="gantt-sidebar">
+        <div id="gantt-persona-wrap">
+          <input id="gantt-search" type="text" placeholder="🔍 Buscar persona…" autocomplete="off"/>
+          <div id="gantt-dropdown" class="agregar-dropdown-hidden"></div>
+        </div>
+        <div id="gantt-persona-actual">Elegí una persona para ver su Gantt.</div>
+
+        <div id="gantt-cal-nav">
+          <button id="gantt-cal-prev" class="btn-sm">‹</button>
+          <span id="gantt-cal-label">—</span>
+          <button id="gantt-cal-next" class="btn-sm">›</button>
+        </div>
+        <div id="gantt-cal-dow">
+          <span>Lu</span><span>Ma</span><span>Mi</span><span>Ju</span><span>Vi</span><span>Sá</span><span>Do</span>
+        </div>
+        <div id="gantt-calendar"></div>
+        <button id="gantt-hoy" class="btn btn-outline">Hoy</button>
+      </div>
+
+      <div id="gantt-main">
+        <div id="gantt-legend"></div>
+        <div id="gantt-dias"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="panel-ocupacion" class="tab-panel tab-panel-hidden">
+    <div id="ocup-toolbar">
+      <label for="ocup-fecha">Fecha:</label>
+      <input id="ocup-fecha" type="date"/>
+    </div>
+    <div id="ocup-tablas"></div>
+  </div>
+
+  <div id="panel-horas" class="tab-panel tab-panel-hidden">
+    <div id="horas-toolbar">
+      <label for="horas-desde">Desde:</label>
+      <input id="horas-desde" type="date"/>
+      <label for="horas-hasta">Hasta:</label>
+      <input id="horas-hasta" type="date"/>
+    </div>
+    <div id="horas-tabla"></div>
+  </div>
+
+  <div id="panel-historial" class="tab-panel tab-panel-hidden">
+    <div id="hist-toolbar">
+      <div id="hist-persona-chip" class="hist-persona-chip-hidden">
+        Mostrando: <strong id="hist-persona-chip-nombre"></strong>
+        <button onclick="limpiarPersonaHistorial()" title="Ver el historial de todos">✕</button>
+      </div>
+      <input id="hist-busqueda" type="text" placeholder="🔍 Filtrar por persona…" autocomplete="off"/>
+      <label for="hist-fecha">Fecha:</label>
+      <input id="hist-fecha" type="date"/>
+      <button id="btn-hist-fecha-limpiar" class="btn btn-outline" title="Ver todas las fechas">Todas las fechas</button>
+      <label class="hist-check"><input id="hist-ver-anulados" type="checkbox"/> Ver anulados</label>
+    </div>
+    <div id="hist-tabla"></div>
+  </div>
+
+  <!-- Overlay de configuración (encargado + secciones a cargo) -->
+  <div id="setup-overlay">
+    <div id="setup-box">
+      <h2>¿Quién sos y qué secciones controlás?</h2>
+      <p>Esto queda guardado en esta computadora.</p>
+
+      <div class="setup-label">Encargado</div>
+      <select id="setup-encargado"></select>
+
+      <div class="setup-label">Secciones a cargo</div>
+      <div id="setup-secciones"></div>
+
+      <div id="setup-error"></div>
+      <button id="btn-setup-guardar">Guardar y continuar</button>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
