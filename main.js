@@ -3,8 +3,10 @@
 // ── Alcos Asistencia PC ──────────────────────────────────────────────────
 // A diferencia de DASHBOARD_PC (que abría su propia ventana Electron),
 // este programa NO tiene ventana propia: levanta un servidor local y abre
-// la interfaz en el navegador por defecto del sistema. Sigue corriendo en
-// segundo plano (ícono de bandeja) aunque se cierre la pestaña del navegador.
+// la interfaz en el navegador por defecto del sistema. Mientras quede
+// alguna pestaña abierta sigue corriendo en segundo plano (ícono de
+// bandeja), pero si se cierran todas, el programa se cierra solo (ver
+// server/app.js: onSinPestanas) y hay que volver a abrirlo con el ícono.
 
 const { app, Tray, Menu, shell, nativeImage } = require('electron');
 const { autoUpdater } = require('electron-updater');
@@ -32,12 +34,16 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
-    // Esta app vive en la bandeja, sin ventanas ni dock: que no se cierre
-    // sola cuando no hay ventanas abiertas (comportamiento por defecto de
-    // Electron en Windows/Linux sería cerrarse; acá lo forzamos a seguir).
+    // Esta app vive en la bandeja, sin ventanas ni dock: Electron no tiene
+    // "window-all-closed" para esto (nunca abre una BrowserWindow propia),
+    // asi que de por si no se cerraria sola nunca. El cierre real pasa por
+    // el latido de server/app.js: cuando deja de recibir avisos de que hay
+    // alguna pestaña del navegador abierta, dispara onSinPestanas y cerramos.
     app.on('window-all-closed', () => {});
 
     server = startServer(PORT);
+    server.onSinPestanas(() => app.quit());
+    server.onCerrarPrograma(() => app.quit());
 
     createTray();
 

@@ -10,9 +10,12 @@ let personal = [];         // ultimo resultado de get_personal_estado (secciones
 let selected = new Set();  // ids de persona tildados
 let filtro = '';
 let config = null;         // { id_encargado, secciones: [ids] }
-let horas = {};            // id_persona -> 'HH:MM' elegida para el proximo registro
+let horas = {};            // id_persona -> 'HH:MM' elegida para el proximo registro individual
+let fechas = {};           // id_persona -> fecha elegida para el proximo registro individual
 let comentarios = {};      // id_persona -> comentario elegido para el proximo registro
+let destinos = {};         // id_persona -> id_seccion elegida como destino de entrada (externos, cuando el encargado controla 2+ secciones)
 let personalTodos = null;  // cache de get_personal_estado sin filtro, para busquedas en toda la planta
+let modalGrupo = null;     // estado del modal "Registrar en grupo" mientras esta abierto (ver mas abajo)
 
 // ── Hora/fecha (America/La_Paz) ──────────────────────────────────────
 
@@ -61,21 +64,20 @@ function setHoraPersona(id_persona, val) {
   if (val) horas[id_persona] = val;
 }
 
+function fechaDePersona(id_persona) {
+  return fechas[id_persona] || fechaHoyLaPaz();
+}
+
+function setFechaPersona(id_persona, val) {
+  if (val) fechas[id_persona] = val;
+}
+
 function comentarioDePersona(id_persona) {
   return comentarios[id_persona] || '';
 }
 
 function setComentarioPersona(id_persona, val) {
   comentarios[id_persona] = val;
-}
-
-function aplicarHoraAGrupo() {
-  const val = document.getElementById('hora-grupo').value;
-  if (!val) { toast('Elegí una hora primero.'); return; }
-  if (!selected.size) { toast('No hay nadie seleccionado.'); return; }
-  selected.forEach(id => { horas[id] = val; });
-  render();
-  toast(`✓ Hora ${val} aplicada a ${selected.size} seleccionado(s).`);
 }
 
 // ── API helper ────────────────────────────────────────────────────────
@@ -169,10 +171,11 @@ async function loadPersonal() {
   try {
     const res = await apiGas('get_personal_estado', { secciones: config.secciones });
     personal = res.personal;
+    destinos = {};
     selected = new Set(personal.map(p => p.id_persona)); // todos preseleccionados
     horas = {};
+    fechas = {};
     comentarios = {};
-    personal.forEach(p => { horas[p.id_persona] = horaRedondeada15(); });
     render();
     actualizarEncabezado();
   } catch (err) {
@@ -248,8 +251,40 @@ function esExterno(p) {
   return !config.secciones.includes(String(p.seccion_actual));
 }
 
+// Si el encargado controla una sola sección, se asume esa sin preguntar nada.
+// Si controla 2+, no se adivina: hace falta una eleccion explicita (manual()
+// la del select de la fila, o la recordada de destinos{} durante la jornada).
+// Devuelve null cuando falta elegir y de verdad es ambiguo.
 function destinoDePersona(p) {
-  return config.secciones[0];
+  if (config.secciones.length === 1) return config.secciones[0];
+  return destinos[p.id_persona] || null;
+}
+
+function necesitaElegirDestino(p) {
+  return esExterno(p) && config.secciones.length > 1 && !destinos[p.id_persona];
+}
+
+function setDestinoPersona(id_persona, id_seccion) {
+  if (id_seccion) destinos[id_persona] = String(id_seccion);
+}
+
+// Lo que corresponde por defecto, SIN mirar elecciones manuales: para
+// externos depende de si estan afuera o adentro; para personal propio,
+// de accion_sugerida (no del estado crudo del padron — alguien "vigente"
+// sin registros puede figurar EN_SECCION ahi y aun asi corresponderle
+// Entrada como primer registro del dia). Se usa para decidir que mostrar
+// en la fila y, en el modal de grupo, en que subgrupo cae cada persona.
+function sugiereEntradaPersona(p) {
+  return esExterno(p) ? p.estado === 'AFUERA' : p.accion_sugerida === 'ENTRADA';
+}
+
+// Destino por defecto para la Entrada de alguien de mis secciones: su
+// propia sección (titular). Si por algun motivo esa sección no es valida
+// (dato faltante o no es de las que controlo), se recomienda cualquiera
+// de las que controlo en vez de dejarlo sin destino.
+function destinoTitularODefecto(p) {
+  if (p.seccion_actual && config.secciones.includes(String(p.seccion_actual))) return p.seccion_actual;
+  return config.secciones[Math.floor(Math.random() * config.secciones.length)];
 }
 
 function fechaCortaDDMM(iso) {
@@ -257,11 +292,12 @@ function fechaCortaDDMM(iso) {
   return `${d}/${m}`;
 }
 
-// Un solo select con TODAS las opciones juntas: salida con motivo (permiso,
-// matrimonio, etc.) y "Mover a <sección>" para cada sección, una opción por
-// sección. Una sola eleccion = queda todo definido de una vez, sin un
-// segundo campo. El valor trae un prefijo para distinguir el tipo:
+// Un solo select con TODAS las opciones juntas: Entrada, salida con motivo
+// (permiso, matrimonio, etc.) y "Mover a <sección>" para cada sección —
+// una sola eleccion define todo de una vez. El valor trae un prefijo:
 //   ""          -> sin eleccion manual, usa la sugerencia por defecto
+//   "entrada"   -> forzar Entrada (solo cuando no hay ambiguedad de sección)
+//   "entrada:ID"-> forzar Entrada a esa sección (cuando el encargado controla 2+)
 //   "motivo:ID" -> salida con ese motivo
 //   "mover:ID"  -> cambio de sección a esa sección
 function onCambioAccionSalida(id_persona, value) {
@@ -269,7 +305,13 @@ function onCambioAccionSalida(id_persona, value) {
   if (!p) return;
   delete p._motivoOverride;
   delete p._destinoOverride;
-  if (value.startsWith('motivo:')) {
+  delete p._entradaOverride;
+  if (value === 'entrada') {
+    p._entradaOverride = true;
+  } else if (value.startsWith('entrada:')) {
+    p._entradaOverride = true;
+    setDestinoPersona(id_persona, value.slice(8));
+  } else if (value.startsWith('motivo:')) {
     p._motivoOverride = value.slice(7);
   } else if (value.startsWith('mover:')) {
     p._destinoOverride = value.slice(6);
@@ -303,6 +345,7 @@ function aplicarMovimientoLocal(mov) {
     p.accion_sugerida = esEntrada ? 'SALIDA' : 'ENTRADA';
     delete p._motivoOverride;
     delete p._destinoOverride;
+    delete p._entradaOverride;
   };
   actualizar(personal);
   actualizar(personalTodos);
@@ -312,18 +355,18 @@ function aplicarMovimientosLocal(movimientos) {
   movimientos.forEach(aplicarMovimientoLocal);
 }
 
-// Vuelve una fila a su accion sugerida por defecto (descarta motivo o destino elegidos a mano)
-function limpiarOverride(id_persona) {
-  const p = personal.find(x => x.id_persona === id_persona);
-  if (!p) return;
-  delete p._motivoOverride;
-  delete p._destinoOverride;
-  render();
-}
-
-// Que se va a registrar para esta fila SI se confirma con "Registrar".
-// Esto es solo una previsualizacion: no escribe nada en la base.
+// Que se va a registrar para esta fila SI se confirma con "Registrar"
+// (flujo individual, fila por fila). Esto es solo una previsualizacion:
+// no escribe nada en la base.
 function accionPrevista(p) {
+  // 0) Si eligieron a mano forzar una Entrada
+  if (p._entradaOverride) {
+    // Para nativo: si controla 2+ secciones puede elegir a cual entra
+    // (destinos{}), pero siempre hay un default sensato (su propia seccion).
+    const destino = esExterno(p) ? destinoDePersona(p) : (destinos[p.id_persona] || destinoTitularODefecto(p));
+    if (!destino) return { tipo: 'PENDIENTE_DESTINO', pendiente: true, etiqueta: '⚠ Elegí a qué sección entra' };
+    return { tipo: 'ENTRADA', seccion: destino, id_motivo: '', etiqueta: `Entrada a ${seccionNombre(destino)}` };
+  }
   // 1) Si eligieron a mano un motivo de salida (vacacion, permiso, matrimonio, etc.)
   if (p._motivoOverride) {
     const m = catalogos.tipos_salida.find(t => String(t.id_motivo) === String(p._motivoOverride));
@@ -343,6 +386,7 @@ function accionPrevista(p) {
   // 3) Externo (esta vigente en una seccion que este encargado no controla): por defecto, traerlo a la suya
   if (esExterno(p)) {
     const destino = destinoDePersona(p);
+    if (!destino) return { tipo: 'PENDIENTE_DESTINO', pendiente: true, etiqueta: '⚠ Elegí a qué sección entra' };
     if (p.estado === 'AFUERA') {
       return { tipo: 'ENTRADA', seccion: destino, id_motivo: '', etiqueta: `Entrada a ${seccionNombre(destino)}` };
     }
@@ -351,9 +395,12 @@ function accionPrevista(p) {
       etiqueta: `Cambio de sección → Entrada a ${seccionNombre(destino)}`
     };
   }
-  // 4) Nativo de mis secciones: sugerencia automatica segun su ultimo registro
+  // 4) Nativo de mis secciones: sugerencia automatica segun su ultimo registro.
+  // Si controla 2+ secciones y ya eligio una distinta a su propia seccion
+  // (destinos{}), se respeta esa eleccion; si no, se asume su propia seccion.
   if (p.accion_sugerida === 'ENTRADA') {
-    return { tipo: 'ENTRADA', seccion: p.seccion_actual, id_motivo: '', etiqueta: `Entrada a ${seccionNombre(p.seccion_actual)}` };
+    const destino = destinos[p.id_persona] || destinoTitularODefecto(p);
+    return { tipo: 'ENTRADA', seccion: destino, id_motivo: '', etiqueta: `Entrada a ${seccionNombre(destino)}` };
   }
   return { tipo: 'SALIDA', seccion: p.seccion_actual, id_motivo: '4', etiqueta: 'Salida regular' };
 }
@@ -365,32 +412,58 @@ function antesLabel(p) {
   return `${p.ultimo_motivo_nombre || 'Salida'} desde ${fechaCorta(p.ultimo_fecha)}`;
 }
 
-// Despues: el registro nuevo que se va a crear si confirma ahora (con la hora que elegio)
+// Despues: el registro nuevo que se va a crear si confirma ahora. La fecha
+// y hora no se repiten aca — ya se muestran (y se editan) en el boton 🕐
+// de al lado, no hace falta decirlo dos veces en la misma fila.
 function despuesLabel(p) {
-  const prevista = accionPrevista(p);
-  const hora = horaDePersona(p.id_persona);
-  return `${prevista.etiqueta} · ${fechaCortaDDMM(fechaHoyLaPaz())} ${hora}`;
+  return accionPrevista(p).etiqueta;
 }
 
 function filaHtml(p) {
   const checked = selected.has(p.id_persona) ? 'checked' : '';
   const externo = esExterno(p);
-  const tieneEleccionManual = !!(p._motivoOverride || p._destinoOverride);
   const prevista = accionPrevista(p);
-  const pillClass = prevista.tipo === 'CAMBIO_SECCION' ? 'accion-cambio'
+  const pillClass = prevista.pendiente ? 'accion-pendiente'
+    : prevista.tipo === 'CAMBIO_SECCION' ? 'accion-cambio'
     : prevista.tipo === 'ENTRADA' ? 'accion-entrada' : 'accion-salida';
 
-  // Un solo select con todo junto: motivos de salida + "Mover a <sección>"
-  // (una opcion por sección) — una sola eleccion define todo de una vez.
-  const motivosOptions = catalogos.tipos_salida
+  // Que opciones tienen sentido depende de la sugerencia base (antes de
+  // cualquier eleccion manual): si lo que corresponde es Entrada, salir o
+  // mover no aplica todavia; si lo que corresponde es Salida/Mover, forzar
+  // Entrada no aplica. Para externos esto se basa en su estado real
+  // (afuera/adentro); para el personal propio, en accion_sugerida — que es
+  // lo que realmente decide accionPrevista() mas abajo, no el estado crudo
+  // (alguien "vigente" sin registros puede figurar como EN_SECCION en el
+  // padron y aun asi corresponderle Entrada como primer registro del dia).
+  const sugiereEntrada = sugiereEntradaPersona(p);
+
+  // Un solo select con todo junto: Entrada + motivos de salida + "Mover a
+  // <sección>" (una opcion por sección) — una sola eleccion define todo.
+  const motivosOptions = sugiereEntrada ? '' : catalogos.tipos_salida
     .filter(m => m.clasificacion !== 'Interna')
     .map(m => `<option value="motivo:${m.id_motivo}" ${String(p._motivoOverride) === String(m.id_motivo) ? 'selected' : ''}>${m.nombre}</option>`).join('');
 
-  const moverOptions = catalogos.secciones
+  const moverOptions = sugiereEntrada ? '' : catalogos.secciones
     .filter(s => String(s.id_seccion) !== String(p.seccion_actual))
     .map(s => `<option value="mover:${s.id_seccion}" ${String(p._destinoOverride) === String(s.id_seccion) ? 'selected' : ''}>↪ Mover a ${s.nombre}</option>`).join('');
 
-  const selectAccionValue = p._destinoOverride ? `mover:${p._destinoOverride}`
+  // Si el encargado controla 2+ secciones, "Entrada" no puede ser una sola
+  // opcion generica: hay que poder elegir a cual, una por sección — tanto
+  // para externos (obligatorio, sin default) como para personal propio
+  // (opcional, por defecto entra a su propia sección).
+  const entradaAmbigua = sugiereEntrada && config.secciones.length > 1;
+  const destinoElegido = destinos[p.id_persona];
+  const entradaOptions = !sugiereEntrada ? '' : entradaAmbigua
+    ? catalogos.secciones
+        .filter(s => config.secciones.includes(String(s.id_seccion)))
+        .map(s => `<option value="entrada:${s.id_seccion}" ${String(destinoElegido) === String(s.id_seccion) && p._entradaOverride ? 'selected' : ''}>→ Entrada a ${s.nombre}</option>`).join('')
+    : `<option value="entrada" ${p._entradaOverride ? 'selected' : ''}>Entrada</option>`;
+
+  const opcionAutoLabel = sugiereEntrada ? 'Entrada sugerida…' : 'Salida regular…';
+
+  const selectAccionValue = p._entradaOverride
+    ? (entradaAmbigua ? `entrada:${destinoElegido || ''}` : 'entrada')
+    : p._destinoOverride ? `mover:${p._destinoOverride}`
     : p._motivoOverride ? `motivo:${p._motivoOverride}` : '';
 
   const comentarioActual = comentarioDePersona(p.id_persona);
@@ -413,20 +486,21 @@ function filaHtml(p) {
         <div class="row-col row-col-despues">
           <div class="col-controls">
             <span class="accion-pill ${pillClass}">${despuesLabel(p)}</span>
-            <input type="time" class="row-hora" step="60" value="${horaDePersona(p.id_persona)}"
-                   onchange="setHoraPersona('${p.id_persona}', this.value)" title="Hora del registro"/>
-            <select class="row-select" onchange="onCambioAccionSalida('${p.id_persona}', this.value)" title="Elegir salida con motivo o mover de sección">
-              <option value="" ${selectAccionValue === '' ? 'selected' : ''}>Salida regular…</option>
+            <button class="row-fechahora-btn" onclick="abrirFechaHora(event, '${p.id_persona}')" title="Editar fecha y hora del registro">
+              🕐 ${fechaCortaDDMM(fechaDePersona(p.id_persona))} ${horaDePersona(p.id_persona)}
+            </button>
+            <select class="row-select" onchange="onCambioAccionSalida('${p.id_persona}', this.value)" title="Elegir entrada, salida con motivo, o mover de sección">
+              <option value="" ${selectAccionValue === '' ? 'selected' : ''}>${opcionAutoLabel}</option>
+              ${entradaOptions}
               ${motivosOptions}
               ${moverOptions}
             </select>
             <button class="${comentarioBtnClass}" onclick="abrirComentario(event, '${p.id_persona}')" title="${escapeHtml(comentarioTitle)}">💬</button>
           </div>
-          ${tieneEleccionManual ? `<button class="btn-link" onclick="limpiarOverride('${p.id_persona}')">✕ Quitar selección, volver a lo sugerido</button>` : ''}
         </div>
       </div>
 
-      <button class="btn-sm btn-sm-entrada btn-registrar-fila" onclick="registrarIndividual('${p.id_persona}')">✓ Registrar</button>
+      <button class="btn-sm btn-sm-entrada btn-registrar-fila" ${prevista.pendiente ? 'disabled title="Elegí primero a qué sección entra"' : ''} onclick="registrarIndividual('${p.id_persona}')">✓ Registrar</button>
       <button class="btn-sm" onclick="abrirGanttDesdeRegistro('${p.id_persona}')" title="Ver diagrama de Gantt de esta persona">📊</button>
       <button class="btn-sm" onclick="abrirHistorialDesdeRegistro('${p.id_persona}')" title="Ver y editar el historial de esta persona">🗂</button>
       <button class="btn-quitar-fila" onclick="quitarDeLista('${p.id_persona}')" title="Quitar de mi preselección">✕</button>
@@ -439,7 +513,7 @@ function filaHtml(p) {
 function abrirComentario(evt, id_persona) {
   evt.stopPropagation();
   cerrarComentario();
-  cerrarMover();
+  cerrarFechaHora();
   const actual = comentarioDePersona(id_persona);
 
   const pop = document.createElement('div');
@@ -485,6 +559,67 @@ function guardarComentario(id_persona) {
   const input = document.getElementById('comentario-input');
   setComentarioPersona(id_persona, input ? input.value : '');
   cerrarComentario();
+  render();
+}
+
+// ── Fecha/hora (mini popup, un solo control en vez de dos cajas fijas) ─
+// Se abre con el boton 🕐 de la fila, que ya muestra la fecha/hora elegida;
+// adentro se editan las dos juntas (el input de fecha trae su calendario
+// nativo). Se guarda con "Guardar" o presionando Enter en cualquiera.
+
+function abrirFechaHora(evt, id_persona) {
+  evt.stopPropagation();
+  cerrarFechaHora();
+  cerrarComentario();
+  const fecha = fechaDePersona(id_persona);
+  const hora = horaDePersona(id_persona);
+
+  const pop = document.createElement('div');
+  pop.className = 'comentario-pop fechahora-pop';
+  pop.id = 'fechahora-pop';
+  pop.innerHTML = `
+    <div class="comentario-pop-label">Fecha y hora del registro</div>
+    <div class="comentario-pop-inputs">
+      <input type="date" id="fechahora-fecha-input" value="${fecha}"/>
+      <input type="time" id="fechahora-hora-input" step="60" value="${hora}"/>
+    </div>
+    <div class="comentario-pop-btns">
+      <button class="ok" onclick="guardarFechaHora('${id_persona}')">Guardar</button>
+      <button class="cancel" onclick="cerrarFechaHora()">Cancelar</button>
+    </div>`;
+  document.body.appendChild(pop);
+
+  const rect = evt.currentTarget.getBoundingClientRect();
+  pop.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+  const left = Math.min(rect.left + window.scrollX - 20, window.scrollX + window.innerWidth - pop.offsetWidth - 12);
+  pop.style.left = Math.max(window.scrollX + 8, left) + 'px';
+
+  const horaInput = document.getElementById('fechahora-hora-input');
+  horaInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); guardarFechaHora(id_persona); }
+    else if (e.key === 'Escape') { cerrarFechaHora(); }
+  });
+
+  setTimeout(() => document.addEventListener('click', onClickFueraFechaHora), 0);
+}
+
+function onClickFueraFechaHora(e) {
+  const pop = document.getElementById('fechahora-pop');
+  if (pop && !pop.contains(e.target)) cerrarFechaHora();
+}
+
+function cerrarFechaHora() {
+  const pop = document.getElementById('fechahora-pop');
+  if (pop) pop.remove();
+  document.removeEventListener('click', onClickFueraFechaHora);
+}
+
+function guardarFechaHora(id_persona) {
+  const fechaInput = document.getElementById('fechahora-fecha-input');
+  const horaInput = document.getElementById('fechahora-hora-input');
+  if (fechaInput && fechaInput.value) setFechaPersona(id_persona, fechaInput.value);
+  if (horaInput && horaInput.value) setHoraPersona(id_persona, horaInput.value);
+  cerrarFechaHora();
   render();
 }
 
@@ -589,44 +724,148 @@ function onFiltro(v) {
 
 // ── Accion masiva (un solo boton, accion por fila segun accion_sugerida) ─
 
-async function registrarSeleccionados() {
+// ── Registrar en grupo (modal) ─────────────────────────────────────────
+// El sistema ya sabe quien esta afuera y quien adentro, asi que clasifica
+// solo a los seleccionados en dos bloques (Entradas / Salidas) apenas se
+// abre el modal. Cada bloque tiene su propia fecha/hora (pueden ser
+// distintas entre si) y, en Salidas, un solo motivo para todo el bloque
+// (vacacion, permiso, "Movimiento de sección" + destino, etc.). En
+// Entradas, si alguien es externo (puede entrar a mas de una seccion de
+// las que este encargado controla), se puede elegir a cual.
+
+function abrirModalGrupo() {
   const elegidos = personal.filter(p => selected.has(p.id_persona));
   if (!elegidos.length) { toast('No hay nadie seleccionado.'); return; }
 
-  const previstas = elegidos.map(p => accionPrevista(p));
-  const entradas = previstas.filter(a => a.tipo === 'ENTRADA').length;
-  const salidas = previstas.filter(a => a.tipo === 'SALIDA').length;
-  const cambios = previstas.filter(a => a.tipo === 'CAMBIO_SECCION').length;
+  // No se usa el estado crudo del padron: alguien "vigente" sin registros
+  // puede figurar EN_SECCION ahi y aun asi corresponderle Entrada (ver
+  // sugiereEntradaPersona, la misma logica que usa la fila individual).
+  const entradas = elegidos.filter(sugiereEntradaPersona);
+  const salidas = elegidos.filter(p => !sugiereEntradaPersona(p));
 
-  const partes = [];
-  if (entradas) partes.push(`${entradas} entrada(s)`);
-  if (salidas) partes.push(`${salidas} salida(s)`);
-  if (cambios) partes.push(`${cambios} cambio(s) de sección`);
-  if (!confirm(`¿Registrar: ${partes.join(', ')}?`)) return;
+  modalGrupo = {
+    entradas, salidas,
+    fechaEntrada: fechaHoyLaPaz(), horaEntrada: horaRedondeada15(),
+    fechaSalida: fechaHoyLaPaz(), horaSalida: horaRedondeada15(),
+    motivoSalida: '',
+    destinoEntrada: {} // id_persona -> id_seccion (solo para externos)
+  };
+  entradas.forEach(p => {
+    modalGrupo.destinoEntrada[p.id_persona] = destinos[p.id_persona]
+      || (esExterno(p) ? config.secciones[0] : destinoTitularODefecto(p));
+  });
 
-  const fecha = fechaHoyLaPaz();
+  renderModalGrupo();
+  document.getElementById('modal-grupo-overlay').classList.remove('modal-grupo-overlay-hidden');
+}
+
+function cerrarModalGrupo() {
+  modalGrupo = null;
+  document.getElementById('modal-grupo-overlay').classList.add('modal-grupo-overlay-hidden');
+}
+
+function renderModalGrupo() {
+  if (!modalGrupo) return;
+  const { entradas, salidas } = modalGrupo;
+  let html = '';
+
+  if (entradas.length) {
+    html += `
+      <div class="modal-grupo-seccion">
+        <div class="modal-grupo-titulo">⬇ Entradas (${entradas.length})</div>
+        <div class="modal-grupo-fechahora">
+          <label>Fecha <input type="date" value="${modalGrupo.fechaEntrada}" onchange="modalGrupo.fechaEntrada=this.value"/></label>
+          <label>Hora <input type="time" step="60" value="${modalGrupo.horaEntrada}" onchange="modalGrupo.horaEntrada=this.value"/></label>
+        </div>
+        <div class="modal-grupo-lista">
+          ${entradas.map(p => `
+            <div class="modal-grupo-persona">
+              <span>${escapeHtml(p.nombre)}</span>
+              ${config.secciones.length > 1 ? `
+                <select onchange="modalGrupo.destinoEntrada['${p.id_persona}']=this.value">
+                  ${config.secciones.map(id => `<option value="${id}" ${String(modalGrupo.destinoEntrada[p.id_persona]) === String(id) ? 'selected' : ''}>${seccionNombre(id)}</option>`).join('')}
+                </select>` : ''}
+            </div>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  if (salidas.length) {
+    const motivosOptions = catalogos.tipos_salida
+      .filter(m => m.clasificacion !== 'Interna')
+      .map(m => `<option value="motivo:${m.id_motivo}" ${modalGrupo.motivoSalida === `motivo:${m.id_motivo}` ? 'selected' : ''}>${m.nombre}</option>`).join('');
+    const moverOptions = catalogos.secciones
+      .map(s => `<option value="mover:${s.id_seccion}" ${modalGrupo.motivoSalida === `mover:${s.id_seccion}` ? 'selected' : ''}>↪ Movimiento de sección → ${s.nombre}</option>`).join('');
+    html += `
+      <div class="modal-grupo-seccion">
+        <div class="modal-grupo-titulo">⬆ Salidas (${salidas.length})</div>
+        <div class="modal-grupo-fechahora">
+          <label>Fecha <input type="date" value="${modalGrupo.fechaSalida}" onchange="modalGrupo.fechaSalida=this.value"/></label>
+          <label>Hora <input type="time" step="60" value="${modalGrupo.horaSalida}" onchange="modalGrupo.horaSalida=this.value"/></label>
+        </div>
+        <label class="modal-grupo-motivo-label">Motivo
+          <select onchange="modalGrupo.motivoSalida=this.value">
+            <option value="" ${modalGrupo.motivoSalida === '' ? 'selected' : ''}>Salida regular…</option>
+            ${motivosOptions}
+            ${moverOptions}
+          </select>
+        </label>
+        <div class="modal-grupo-lista">
+          ${salidas.map(p => `<div class="modal-grupo-persona"><span>${escapeHtml(p.nombre)}</span></div>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  document.getElementById('modal-grupo-contenido').innerHTML = html;
+}
+
+async function confirmarRegistroGrupo() {
+  if (!modalGrupo) return;
+  const { entradas, salidas, fechaEntrada, horaEntrada, fechaSalida, horaSalida, motivoSalida, destinoEntrada } = modalGrupo;
+  if (!entradas.length && !salidas.length) { toast('No hay nadie para registrar.'); return; }
+
   const movimientos = [];
-  elegidos.forEach(p => {
-    const hora = horaDePersona(p.id_persona);
-    const comentarios_ = comentarioDePersona(p.id_persona);
-    const prevista = accionPrevista(p);
-    if (prevista.tipo === 'CAMBIO_SECCION') {
-      movimientos.push({ id_persona: p.id_persona, id_tipo: 'SALIDA', id_seccion: prevista.seccion_origen, id_motivo: prevista.id_motivo, id_encargado: config.id_encargado, fecha, hora, comentarios: comentarios_ });
-      movimientos.push({ id_persona: p.id_persona, id_tipo: 'ENTRADA', id_seccion: prevista.seccion_destino, id_motivo: prevista.id_motivo, id_encargado: config.id_encargado, fecha, hora, comentarios: comentarios_ });
+
+  entradas.forEach(p => {
+    const destino = destinoEntrada[p.id_persona]
+      || (esExterno(p) ? destinoDePersona(p) : destinoTitularODefecto(p));
+    if (destino) setDestinoPersona(p.id_persona, destino); // recordarlo para el flujo individual
+    movimientos.push({
+      id_persona: p.id_persona, id_tipo: 'ENTRADA', id_seccion: destino, id_motivo: '',
+      id_encargado: config.id_encargado, fecha: fechaEntrada, hora: horaEntrada,
+      comentarios: comentarioDePersona(p.id_persona)
+    });
+  });
+
+  salidas.forEach(p => {
+    const comentario = comentarioDePersona(p.id_persona);
+    if (motivoSalida.startsWith('mover:')) {
+      const destino = motivoSalida.slice(6);
+      movimientos.push({ id_persona: p.id_persona, id_tipo: 'SALIDA', id_seccion: p.seccion_actual, id_motivo: '1', id_encargado: config.id_encargado, fecha: fechaSalida, hora: horaSalida, comentarios: comentario });
+      movimientos.push({ id_persona: p.id_persona, id_tipo: 'ENTRADA', id_seccion: destino, id_motivo: '1', id_encargado: config.id_encargado, fecha: fechaSalida, hora: horaSalida, comentarios: comentario });
     } else {
-      movimientos.push({ id_persona: p.id_persona, id_tipo: prevista.tipo, id_seccion: prevista.seccion, id_motivo: prevista.id_motivo, id_encargado: config.id_encargado, fecha, hora, comentarios: comentarios_ });
+      const id_motivo = motivoSalida.startsWith('motivo:') ? motivoSalida.slice(7) : '4';
+      movimientos.push({ id_persona: p.id_persona, id_tipo: 'SALIDA', id_seccion: p.seccion_actual, id_motivo, id_encargado: config.id_encargado, fecha: fechaSalida, hora: horaSalida, comentarios: comentario });
     }
   });
+
+  const partes = [];
+  if (entradas.length) partes.push(`${entradas.length} entrada(s)`);
+  if (salidas.length) partes.push(`${salidas.length} salida(s)`);
+  if (!confirm(`¿Registrar: ${partes.join(', ')}?`)) return;
 
   try {
     const res = await apiGas('registrar_lote', { movimientos });
     if (res.offline) {
       aplicarMovimientosLocal(movimientos);
       selected.clear();
+      cerrarModalGrupo();
       render();
       toast(`📶 Sin conexión: ${movimientos.length} registro(s) guardado(s) localmente, se enviarán solos cuando vuelva la señal.`);
       actualizarBannerOffline();
     } else {
+      selected.clear();
+      cerrarModalGrupo();
       toast(`✓ ${res.cantidad} registro(s) guardado(s).`);
       await loadPersonal();
       invalidarCacheCompartida();
@@ -636,12 +875,13 @@ async function registrarSeleccionados() {
   }
 }
 
-// ── Acciones individuales ────────────────────────────────────────────
+// ── Registrar individual (una sola fila, con su fecha/hora/tipo elegidos) ─
 
 async function registrarIndividual(id_persona) {
   const p = personal.find(p => p.id_persona === id_persona);
   const prevista = accionPrevista(p);
-  const fecha = fechaHoyLaPaz();
+  if (prevista.pendiente) { toast('⚠ Elegí primero a qué sección entra.'); return; }
+  const fecha = fechaDePersona(id_persona);
   const hora = horaDePersona(id_persona);
   const comentario = comentarioDePersona(id_persona);
   try {
@@ -767,6 +1007,21 @@ function toggleHeaderMenu(e) {
 
 function cerrarHeaderMenu() {
   document.getElementById('header-menu').classList.add('header-menu-hidden');
+}
+
+// Cierra todo el programa (no solo esta pestaña): equivale a "Salir" desde
+// el ícono de la bandeja, pero accesible desde la propia web.
+function cerrarPrograma() {
+  if (!confirm('¿Cerrar el programa? Dejará de registrar hasta que alguien lo vuelva a abrir.')) return;
+  fetch('/api/cerrar-programa', { method: 'POST' }).catch(() => {});
+}
+
+// Muestra la version instalada junto al titulo (si no hay conexion al
+// servidor local por algun motivo raro, simplemente queda en blanco).
+function cargarVersion() {
+  fetch('/api/version').then(r => r.json()).then(d => {
+    document.getElementById('app-version').textContent = d.version ? `v${d.version}` : '';
+  }).catch(() => {});
 }
 
 // ── Tabs (Registro / Gantt / Ocupación / Horas-Persona) ──────────────
@@ -1604,16 +1859,18 @@ async function init() {
   document.addEventListener('click', cerrarHeaderMenu);
   document.getElementById('header-menu').addEventListener('click', e => e.stopPropagation());
   document.getElementById('btn-config').addEventListener('click', () => { cerrarHeaderMenu(); abrirSetup(); });
+  document.getElementById('btn-cerrar-programa').addEventListener('click', () => { cerrarHeaderMenu(); cerrarPrograma(); });
   document.getElementById('btn-setup-guardar').addEventListener('click', guardarSetup);
   document.getElementById('search').addEventListener('input', e => onFiltro(e.target.value));
   document.getElementById('search').addEventListener('focus', mostrarDropdownAgregar);
   document.getElementById('search').addEventListener('click', mostrarDropdownAgregar);
-  document.getElementById('btn-registrar').addEventListener('click', registrarSeleccionados);
   document.getElementById('btn-update').addEventListener('click', () => { cerrarHeaderMenu(); buscarActualizaciones(); });
   document.getElementById('banner-update-btn').addEventListener('click', instalarActualizacion);
   document.getElementById('btn-sel-todo').addEventListener('click', seleccionarTodo);
   document.getElementById('btn-desel-todo').addEventListener('click', desmarcarTodo);
-  document.getElementById('btn-aplicar-hora-grupo').addEventListener('click', aplicarHoraAGrupo);
+  document.getElementById('btn-registrar-grupo').addEventListener('click', abrirModalGrupo);
+  document.getElementById('btn-modal-grupo-cancelar').addEventListener('click', cerrarModalGrupo);
+  document.getElementById('btn-modal-grupo-confirmar').addEventListener('click', confirmarRegistroGrupo);
 
   document.getElementById('gantt-search').addEventListener('input', e => { ganttFiltro = e.target.value; renderGanttDropdown(); });
   document.getElementById('gantt-search').addEventListener('focus', mostrarGanttDropdown);
@@ -1632,9 +1889,6 @@ async function init() {
   document.getElementById('hist-fecha').addEventListener('change', renderHistorial);
   document.getElementById('btn-hist-fecha-limpiar').addEventListener('click', limpiarFechaHistorial);
   document.getElementById('hist-ver-anulados').addEventListener('change', renderHistorial);
-
-  const horaGrupo = document.getElementById('hora-grupo');
-  horaGrupo.value = horaRedondeada15();
 
   if (!config || !config.secciones || !config.secciones.length) {
     abrirSetup();
@@ -1691,3 +1945,15 @@ function iniciarMonitoreoOffline() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+// ── Latido ("sigo abierta") ──────────────────────────────────────────
+// Mientras esta pestaña exista, le avisa al servidor local cada 10s que
+// sigue abierta (ver server/app.js). Si el servidor deja de recibir este
+// aviso de TODAS las pestañas por un rato, asume que no queda ninguna y
+// cierra el programa. No depende de init() ni de que haya conexion a
+// Google: corre siempre que la pagina este cargada.
+setInterval(() => {
+  fetch('/api/latido', { method: 'POST' }).catch(() => {});
+}, 10000);
+fetch('/api/latido', { method: 'POST' }).catch(() => {});
+cargarVersion();

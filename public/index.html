@@ -16,7 +16,7 @@
 
   <div id="header">
     <div>
-      <h1>Alcos Asistencia PC</h1>
+      <h1>Alcos Asistencia PC <span id="app-version" class="version-tag"></span></h1>
       <div id="header-sub">Cargando…</div>
     </div>
     <div id="header-menu-wrap">
@@ -24,6 +24,7 @@
       <div id="header-menu" class="header-menu-hidden">
         <button id="btn-update" class="header-menu-item">🔄 Buscar actualizaciones</button>
         <button id="btn-config" class="header-menu-item">👤 Cambiar encargado/secciones</button>
+        <button id="btn-cerrar-programa" class="header-menu-item header-menu-item-peligro">❌ Cerrar programa</button>
       </div>
     </div>
   </div>
@@ -45,15 +46,12 @@
         <div id="agregar-dropdown" class="agregar-dropdown-hidden"></div>
       </div>
       <span id="contador">0/0 seleccionados</span>
-      <button id="btn-registrar" class="btn btn-registrar">✅ Registrar seleccionados</button>
     </div>
 
     <div id="toolbar-row2">
       <button id="btn-sel-todo" class="btn btn-outline">☑ Seleccionar todo</button>
       <button id="btn-desel-todo" class="btn btn-outline">☐ Desmarcar todo</button>
-      <label for="hora-grupo">Hora para seleccionados:</label>
-      <input id="hora-grupo" type="time" step="60"/>
-      <button id="btn-aplicar-hora-grupo" class="btn btn-outline">Aplicar a seleccionados</button>
+      <button id="btn-registrar-grupo" class="btn btn-registrar">👥 Registrar en grupo</button>
     </div>
 
     <div id="lista-cols-header">
@@ -147,6 +145,19 @@
 
       <div id="setup-error"></div>
       <button id="btn-setup-guardar">Guardar y continuar</button>
+    </div>
+  </div>
+
+  <!-- Modal "Registrar en grupo": clasifica solo a los seleccionados entre
+       Entradas (los que estan afuera) y Salidas (los que estan adentro) -->
+  <div id="modal-grupo-overlay" class="modal-grupo-overlay-hidden">
+    <div id="modal-grupo-box">
+      <h2>Registrar en grupo</h2>
+      <div id="modal-grupo-contenido"></div>
+      <div id="modal-grupo-botones">
+        <button id="btn-modal-grupo-cancelar" class="btn btn-outline">Cancelar</button>
+        <button id="btn-modal-grupo-confirmar" class="btn btn-registrar">Confirmar registro</button>
+      </div>
     </div>
   </div>
 

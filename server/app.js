@@ -8,6 +8,7 @@ const express = require('express');
 const path = require('path');
 const { callGAS } = require('./gas');
 const cola = require('./queue');
+const pkg = require('../package.json');
 
 // Acciones de ESCRITURA que, si falla la conexion, se encolan en vez de
 // fallar: son las unicas que la pantalla de Registro necesita para poder
@@ -75,6 +76,47 @@ function startServer(port) {
   setInterval(intentarSincronizar, 20000);
   setTimeout(intentarSincronizar, 5000);
 
+  // ── Latido de pestañas abiertas (para saber cuando cerrar el programa) ─
+  // Electron no tiene ventana propia aca (abre el navegador externo), asi
+  // que no hay forma nativa de detectar "se cerraron todas las pestañas".
+  // En su lugar, cada pestaña abierta llama a este endpoint cada 10s
+  // mientras exista (este-intervalo-en-public/app.js); si el servidor deja
+  // de recibir avisos por mas de UMBRAL_SIN_PESTANAS_MS, asume que no
+  // queda ninguna pestaña y avisa a main.js para que cierre el programa.
+  // Arranca "recien visto" en el momento en que levanta el servidor, para
+  // no disparar antes de que la primera pestaña (la que se abre sola al
+  // iniciar) alcance a mandar su primer latido.
+  const UMBRAL_SIN_PESTANAS_MS = 25000;
+  let ultimoLatido = Date.now();
+  let onSinPestanasCb = () => {};
+  let avisoYaEnviado = false;
+
+  app.post('/api/latido', (req, res) => {
+    ultimoLatido = Date.now();
+    avisoYaEnviado = false;
+    res.json({ ok: true });
+  });
+
+  // ── Version instalada ────────────────────────────────────────────────
+  app.get('/api/version', (req, res) => {
+    res.json({ version: pkg.version });
+  });
+
+  // ── Cerrar programa a mano (boton en la web, ademas de "Salir" en la
+  // bandeja y del cierre automatico por falta de pestañas) ─────────────
+  let onCerrarProgramaCb = () => {};
+  app.post('/api/cerrar-programa', (req, res) => {
+    res.json({ ok: true });
+    onCerrarProgramaCb();
+  });
+
+  setInterval(() => {
+    if (!avisoYaEnviado && Date.now() - ultimoLatido > UMBRAL_SIN_PESTANAS_MS) {
+      avisoYaEnviado = true;
+      onSinPestanasCb();
+    }
+  }, 5000);
+
   // ── Estado de actualización ──────────────────────────────────────────
   // main.js escribe acá el último estado que reportó electron-updater;
   // la web lo consulta por polling simple para mostrar un aviso.
@@ -109,6 +151,8 @@ function startServer(port) {
     onCheckForUpdates: cb => { onCheckCb = cb; },
     onDownloadUpdate: cb => { onDownloadCb = cb; },
     onInstallUpdate: cb => { onInstallCb = cb; },
+    onSinPestanas: cb => { onSinPestanasCb = cb; },
+    onCerrarPrograma: cb => { onCerrarProgramaCb = cb; },
     close: () => server.close()
   };
 }
