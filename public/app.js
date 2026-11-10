@@ -179,16 +179,17 @@ async function loadPersonal() {
     render();
     actualizarEncabezado();
   } catch (err) {
+    const msg = mensajeErrorConexion(err);
     if (teniaDatos) {
-      // Sin conexion: seguimos mostrando lo que ya teniamos cargado en
-      // vez de dejar la pantalla en "Cargando…" para siempre.
+      // Seguimos mostrando lo que ya teniamos cargado en vez de dejar la
+      // pantalla en "Cargando…" para siempre.
       render();
       actualizarEncabezado();
-      toast('📶 Sin conexión: se muestran los últimos datos cargados.');
+      toast('📶 ' + msg + ' Se muestran los últimos datos cargados.');
     } else {
       document.getElementById('lista').innerHTML =
-        '<div id="empty">Sin conexión y sin datos previos. Conectate a internet al menos una vez para cargar el personal.</div>';
-      toast('📶 Sin conexión: no se pudo cargar el personal.');
+        '<div id="empty">' + msg + ' Probá de nuevo, o avisá si sigue igual.</div>';
+      toast('📶 ' + msg);
     }
   }
 }
@@ -242,8 +243,13 @@ function actualizarContador() {
 function fechaCorta(iso) {
   if (!iso) return '';
   const d = new Date(iso);
+  // hour12:false a proposito: sin esto, el formato de hora queda a
+  // criterio del navegador/version para el locale es-BO, y eso es lo que
+  // causaba ver a veces "04:43 p. m." y a veces "16:43" segun donde se
+  // abriera el programa. Con hour12:false siempre es 24h, sin importar
+  // el navegador.
   return d.toLocaleDateString('es-BO', { day: '2-digit', month: '2-digit' }) +
-    ' ' + d.toLocaleTimeString('es-BO', { hour: '2-digit', minute: '2-digit' });
+    ' ' + d.toLocaleTimeString('es-BO', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
 // Es "externo" si su ubicacion actual no es ninguna de las secciones que este encargado controla
@@ -353,6 +359,64 @@ function aplicarMovimientoLocal(mov) {
 
 function aplicarMovimientosLocal(movimientos) {
   movimientos.forEach(aplicarMovimientoLocal);
+}
+
+// ── Agregar los movimientos nuevos al cache de Registros (ganttRegistros) ──
+// Mismo espiritu que aplicarMovimientoLocal, pero para el cache que usan
+// Gantt/Ocupación/Horas-Persona: en vez de tirar todo el cache y volver a
+// pedirlo al servidor cada vez que se registra algo (lo que hacia que
+// entrar al Gantt despues de registrar demorara), se agrega la fila nueva
+// directo en memoria, con la misma forma que devuelve get_registros.
+// id_registro queda con un id temporal hasta que la respuesta real del
+// servidor llega (ver confirmarIdsLocal, llamado desde
+// registrarEnSegundoPlano) — mientras tanto alcanza para graficar y
+// calcular horas, que es lo unico que usa el Gantt.
+function construirTimestampLocal(mov) {
+  if (mov.fecha && mov.hora) {
+    const [y, m, d] = mov.fecha.split('-').map(Number);
+    const [hh, mm] = mov.hora.split(':').map(Number);
+    return new Date(y, m - 1, d, hh, mm, 0);
+  }
+  return new Date();
+}
+
+function fechaYMDLocal(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function agregarRegistrosLocal(movimientos) {
+  if (!ganttRegistros) return; // todavia no se cargo ni una vez: no hay nada que parchar, se va a traer completo la primera vez que haga falta
+  movimientos.forEach(mov => {
+    const ts = construirTimestampLocal(mov);
+    ganttRegistros.push({
+      id_registro: mov._tmpId,
+      timestamp: ts.toISOString(),
+      fecha: fechaYMDLocal(ts),
+      id_persona: String(mov.id_persona),
+      id_tipo: String(mov.id_tipo).toUpperCase(),
+      id_seccion: String(mov.id_seccion),
+      id_motivo: mov.id_motivo ? String(mov.id_motivo) : '',
+      id_encargado: mov.id_encargado ? String(mov.id_encargado) : '',
+      comentarios: mov.comentarios || '',
+      anulado: false,
+      anulado_por: '',
+      anulado_en: '',
+      uuid: mov._tmpId,
+      id_tablet: ''
+    });
+  });
+}
+
+// Reemplaza el id temporal por el id_registro real que asigno el
+// servidor, una vez que la respuesta llega (en segundo plano).
+function confirmarIdsLocal(movimientos, idsReales) {
+  if (!ganttRegistros) return;
+  movimientos.forEach((mov, i) => {
+    const real = idsReales[i];
+    if (real == null) return;
+    const fila = ganttRegistros.find(r => r.uuid === mov._tmpId);
+    if (fila) fila.id_registro = real;
+  });
 }
 
 // Que se va a registrar para esta fila SI se confirma con "Registrar"
@@ -854,25 +918,20 @@ async function confirmarRegistroGrupo() {
   if (salidas.length) partes.push(`${salidas.length} salida(s)`);
   if (!confirm(`¿Registrar: ${partes.join(', ')}?`)) return;
 
-  try {
-    const res = await apiGas('registrar_lote', { movimientos });
-    if (res.offline) {
-      aplicarMovimientosLocal(movimientos);
-      selected.clear();
-      cerrarModalGrupo();
-      render();
-      toast(`📶 Sin conexión: ${movimientos.length} registro(s) guardado(s) localmente, se enviarán solos cuando vuelva la señal.`);
-      actualizarBannerOffline();
-    } else {
-      selected.clear();
-      cerrarModalGrupo();
-      toast(`✓ ${res.cantidad} registro(s) guardado(s).`);
-      await loadPersonal();
-      invalidarCacheCompartida();
-    }
-  } catch (err) {
-    toast('⚠ ' + err.message);
-  }
+  movimientos.forEach(m => { m._tmpId = 'tmp_' + Date.now() + '_' + Math.random().toString(36).slice(2); });
+
+  // Optimista: se aplica y se ve en pantalla YA, sin esperar al servidor.
+  // El envío real sigue atrás (ver registrarEnSegundoPlano), y si algo
+  // falla, esa misma función avisa con un toast — para entonces el
+  // encargado ya está trabajando en la fila siguiente.
+  aplicarMovimientosLocal(movimientos);
+  agregarRegistrosLocal(movimientos);
+  selected.clear();
+  cerrarModalGrupo();
+  render();
+  toast(`✓ ${partes.join(', ')} aplicado(s).`);
+
+  registrarEnSegundoPlano(movimientos, partes.join(', '));
 }
 
 // ── Registrar individual (una sola fila, con su fecha/hora/tipo elegidos) ─
@@ -884,37 +943,66 @@ async function registrarIndividual(id_persona) {
   const fecha = fechaDePersona(id_persona);
   const hora = horaDePersona(id_persona);
   const comentario = comentarioDePersona(id_persona);
+
+  let movimientos;
+  if (prevista.tipo === 'CAMBIO_SECCION') {
+    movimientos = [
+      { id_persona, id_tipo: 'SALIDA', id_seccion: prevista.seccion_origen, id_motivo: prevista.id_motivo, id_encargado: config.id_encargado, fecha, hora, comentarios: comentario },
+      { id_persona, id_tipo: 'ENTRADA', id_seccion: prevista.seccion_destino, id_motivo: prevista.id_motivo, id_encargado: config.id_encargado, fecha, hora, comentarios: comentario }
+    ];
+  } else {
+    movimientos = [{
+      id_persona, id_tipo: prevista.tipo, id_seccion: prevista.seccion,
+      id_motivo: prevista.id_motivo, id_encargado: config.id_encargado,
+      fecha, hora, comentarios: comentario
+    }];
+  }
+
+  movimientos.forEach(m => { m._tmpId = 'tmp_' + Date.now() + '_' + Math.random().toString(36).slice(2); });
+
+  // Optimista: se aplica y se ve en pantalla YA, sin esperar al servidor
+  // (ver registrarEnSegundoPlano, que manda el pedido real atrás y avisa
+  // con un toast si algo falla).
+  aplicarMovimientosLocal(movimientos);
+  agregarRegistrosLocal(movimientos);
+  render();
+  toast(prevista.tipo === 'CAMBIO_SECCION'
+    ? `✓ ${p.nombre} cambiado de sección a ${seccionNombre(prevista.seccion_destino)}.`
+    : `✓ ${prevista.etiqueta} registrada para ${p.nombre}.`);
+
+  registrarEnSegundoPlano(movimientos, p.nombre);
+}
+
+// Manda el/los movimiento(s) al servidor DESPUES de que la pantalla ya se
+// actualizo (ver registrarIndividual/confirmarRegistroGrupo, arriba). A
+// proposito no se espera (await) desde ahi: el encargado ya ve la fila
+// actualizada y puede seguir trabajando mientras esto termina en segundo
+// plano. Si el envio real falla (y no es el caso ya manejado de "se
+// encolo porque no hay conexion"), esta funcion es la que avisa con un
+// toast de error — la pantalla ya quedo con el cambio aplicado, asi que
+// el aviso es para que el encargado sepa que todavia no llego al
+// servidor, no para que se quede esperando.
+async function registrarEnSegundoPlano(movimientos, etiqueta) {
   try {
-    let res;
-    let movimientos;
-    if (prevista.tipo === 'CAMBIO_SECCION') {
-      movimientos = [
-        { id_persona, id_tipo: 'SALIDA', id_seccion: prevista.seccion_origen, id_motivo: prevista.id_motivo, id_encargado: config.id_encargado, fecha, hora, comentarios: comentario },
-        { id_persona, id_tipo: 'ENTRADA', id_seccion: prevista.seccion_destino, id_motivo: prevista.id_motivo, id_encargado: config.id_encargado, fecha, hora, comentarios: comentario }
-      ];
-      res = await apiGas('registrar_lote', { movimientos });
-    } else {
-      movimientos = [{
-        id_persona, id_tipo: prevista.tipo, id_seccion: prevista.seccion,
-        id_motivo: prevista.id_motivo, id_encargado: config.id_encargado,
-        fecha, hora, comentarios: comentario
-      }];
-      res = await apiGas('registrar_movimiento', movimientos[0]);
-    }
+    const res = movimientos.length === 1
+      ? await apiGas('registrar_movimiento', movimientos[0])
+      : await apiGas('registrar_lote', { movimientos });
 
     if (res.offline) {
-      aplicarMovimientosLocal(movimientos);
-      render();
-      toast(`📶 Sin conexión: se guardó localmente lo de ${p.nombre}, se enviará solo cuando vuelva la señal.`);
+      toast(`📶 Sin conexión: ${etiqueta} quedó guardado localmente, se enviará solo cuando vuelva la señal.`);
       actualizarBannerOffline();
     } else {
-      toast(prevista.tipo === 'CAMBIO_SECCION'
-        ? `✓ ${p.nombre} cambiado de sección a ${seccionNombre(prevista.seccion_destino)}.`
-        : `✓ ${prevista.etiqueta} registrada para ${p.nombre}.`);
-      await loadPersonal();
-      invalidarCacheCompartida();
+      // Ya se ve bien en pantalla (aplicado localmente, Gantt incluido
+      // via agregarRegistrosLocal) — NO hace falta volver a pedirle nada
+      // al servidor. Solo se reemplaza el id temporal del registro por
+      // el id real que asigno el backend, para que mas adelante se pueda
+      // editar/anular ese registro puntual desde Historial.
+      const idsReales = movimientos.length === 1 ? [res.id_registro] : res.ids;
+      confirmarIdsLocal(movimientos, idsReales || []);
     }
-  } catch (err) { toast('⚠ ' + err.message); }
+  } catch (err) {
+    toast(`⚠ Lo de ${etiqueta} se ve aplicado en pantalla pero no se pudo guardar en el servidor: ${mensajeErrorConexion(err)} Probá "↻ Actualizar" o avisá si sigue fallando.`);
+  }
 }
 
 // ── Actualizaciones (electron-updater via servidor local) ────────────
@@ -1066,9 +1154,35 @@ async function ensureGanttRegistros() {
   if (!ganttRegistrosPromise) {
     ganttRegistrosPromise = apiGas('get_registros', {})
       .then(res => { ganttRegistros = res.registros || []; })
+      .catch(err => {
+        // Antes esto fallaba en silencio: la pantalla de Gantt/Ocupación/
+        // Horas-Persona quedaba vacía sin ningún aviso, como si a una
+        // persona puntual le faltaran datos, cuando en realidad falló el
+        // pedido entero. Ahora avisamos y dejamos ganttRegistros en null
+        // para que el próximo intento (cambiar de pestaña, tocar ↻) vuelva
+        // a pedir los datos en vez de quedarse con "ya lo intenté y fallé".
+        ganttRegistros = null;
+        toast('⚠ ' + mensajeErrorConexion(err));
+        throw err;
+      })
       .finally(() => { ganttRegistrosPromise = null; });
   }
   return ganttRegistrosPromise;
+}
+
+// Traduce un error de apiGas a un mensaje que diga qué falló realmente,
+// en vez de decir siempre "sin conexión" sin importar la causa real:
+//  - el fetch nunca llegó al servidor local de Electron (TypeError,
+//    mensaje tipo "Failed to fetch") -> ahí sí es que el programa de PC
+//    no está corriendo o el puerto 4200 no responde.
+//  - el servidor local respondió pero con un error propio (se cortó la
+//    conexión a internet real, o Apps Script devolvió un fallo) -> viene
+//    como Error con el mensaje que mandó el servidor, no un TypeError.
+function mensajeErrorConexion(err) {
+  if (err instanceof TypeError) {
+    return 'No se pudo conectar con el programa (¿está corriendo Alcos Asistencia PC?).';
+  }
+  return 'No se pudo traer los datos del servidor: ' + (err.message || 'error desconocido') + '.';
 }
 
 // Los datos de Gantt/Ocupación/Horas-Persona (ganttRegistros) y el padron
@@ -1126,7 +1240,7 @@ async function actualizarTodo() {
     }
     toast('✓ Datos actualizados.');
   } catch (err) {
-    toast('⚠ ' + err.message);
+    toast('⚠ ' + mensajeErrorConexion(err));
   }
 }
 
@@ -1140,6 +1254,28 @@ function motivoEsInterno(id_motivo) {
   return !!(m && m.clasificacion === 'Interna');
 }
 
+// Si el dia empieza con la persona ya "abierta" desde un dia anterior
+// (sigue en su seccion sin haber marcado salida, o sigue afuera por un
+// permiso/vacacion que todavia no cerro con una ENTRADA), ese estado se
+// arrastra desde las 00:00 de este dia. Sin esto, un permiso de varios
+// dias (o alguien que nunca marco el regreso) desaparecia del grafico
+// al dia siguiente, porque ese dia no tiene ningun registro propio.
+function estadoAlInicioDeDia(id_persona, fecha) {
+  const medianoche = new Date(fecha + 'T00:00:00').getTime();
+  const anteriores = (ganttRegistros || [])
+    .filter(r => r.id_persona === id_persona && !r.anulado && new Date(r.timestamp).getTime() < medianoche)
+    .sort((a, b) => a.timestamp < b.timestamp ? -1 : (a.timestamp > b.timestamp ? 1 : 0));
+  const ultimo = anteriores[anteriores.length - 1];
+  if (!ultimo) return null;
+  if (ultimo.id_tipo === 'ENTRADA') {
+    return { fila: 'seccion', id_seccion: ultimo.id_seccion, start: medianoche, comentario: '', arrastrado: true };
+  }
+  if (!motivoEsInterno(ultimo.id_motivo)) {
+    return { fila: 'exterior', id_motivo: ultimo.id_motivo, start: medianoche, comentario: '', arrastrado: true };
+  }
+  return null;
+}
+
 // Reconstruye, para una persona y una fecha, los bloques ENTRADA→SALIDA por sección
 // y los bloques "exterior" (cuando la salida no es un cambio de sección interno).
 function buildGanttBloques(id_persona, fecha) {
@@ -1148,7 +1284,7 @@ function buildGanttBloques(id_persona, fecha) {
     .sort((a, b) => a.timestamp < b.timestamp ? -1 : (a.timestamp > b.timestamp ? 1 : 0));
 
   const bloques = [];
-  let cur = null;
+  let cur = estadoAlInicioDeDia(id_persona, fecha);
 
   recs.forEach(r => {
     const t = new Date(r.timestamp).getTime();
@@ -1219,7 +1355,7 @@ function resumenHorasDia(id_persona, fecha) {
 }
 
 function horaCorta(ms) {
-  return new Intl.DateTimeFormat('es-BO', { hour: '2-digit', minute: '2-digit', timeZone: TZ }).format(new Date(ms));
+  return new Intl.DateTimeFormat('es-BO', { hour: '2-digit', minute: '2-digit', timeZone: TZ, hour12: false }).format(new Date(ms));
 }
 
 function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
@@ -1433,10 +1569,15 @@ function renderGanttDias() {
   }
 
   const fechasOrdenadas = [...ganttFechas].sort();
-  cont.innerHTML = fechasOrdenadas.map(f => renderGanttDiaSvg(f)).join('');
+  // Ancho real disponible del contenedor (no un numero fijo): asi el
+  // dibujo ocupa toda la pantalla sin dejar espacio vacio a los costados,
+  // sea cual sea el tamaño de ventana. 40px de margen de seguridad para
+  // que no aparezca scroll horizontal por redondeos.
+  const anchoDisponible = Math.max(400, (cont.clientWidth || 760) - 40);
+  cont.innerHTML = fechasOrdenadas.map(f => renderGanttDiaSvg(f, anchoDisponible)).join('');
 }
 
-function renderGanttDiaSvg(fecha) {
+function renderGanttDiaSvg(fecha, anchoDisponible) {
   const { bloques, abierto } = buildGanttBloques(ganttPersonaId, fecha);
   const medianoche = new Date(fecha + 'T00:00:00').getTime();
   const ahora = Date.now();
@@ -1446,7 +1587,15 @@ function renderGanttDiaSvg(fecha) {
     ? [...bloques, { ...abierto, end: Math.min(abierto.start + 16 * 3600000, medianoche + 24 * 3600000, ahora), enCurso: true }]
     : bloques;
 
+  // El rango del eje SOLO lo estiran los movimientos DENTRO de planta
+  // (fila 'seccion'). Un permiso o vacacion ('exterior') puede durar
+  // horas o dias — si tambien estirara el eje, un solo permiso largo
+  // dejaria el grafico entero fuera de escala (por ejemplo hasta las
+  // 23:00 o mas alla), aunque esa persona no haya estado un segundo
+  // dentro de planta. Los bloques 'exterior' se siguen dibujando, pero
+  // recortados al rango que ya quedo definido (ver px() mas abajo).
   todos.forEach(b => {
+    if (b.fila !== 'seccion') return;
     const sMin = (b.start - medianoche) / 60000;
     const eMin = (b.end - medianoche) / 60000;
     if (sMin < desde) desde = Math.max(0, Math.floor(sMin / 60) * 60);
@@ -1458,13 +1607,17 @@ function renderGanttDiaSvg(fecha) {
     { tipo: 'exterior', id: null, nombre: 'Exterior' }
   ];
 
-  const rowH = 24, rowGap = 4, leftLabel = 110, topAxis = 22, width = 760;
+  // leftLabel ensanchado para que entre el nombre de sección más largo
+  // ("Acondicionado No Estéril") sin cortarse contra el borde izquierdo.
+  // width YA NO es un numero fijo: es el ancho real del contenedor (ver
+  // renderGanttDias), para que el dibujo ocupe toda la pantalla.
+  const rowH = 24, rowGap = 4, leftLabel = 150, topAxis = 22, width = anchoDisponible || 760;
   const totalMin = Math.max(1, hasta - desde);
   const px = min => leftLabel + ((min - desde) / totalMin) * (width - leftLabel);
   const svgH = topAxis + filas.length * (rowH + rowGap);
 
   let ejeMarks = '';
-  for (let m = Math.ceil(desde / 60) * 60; m <= hasta; m += 120) {
+  for (let m = Math.ceil(desde / 60) * 60; m <= hasta; m += 60) {
     const x = px(m);
     const hh = Math.floor(m / 60);
     ejeMarks += `<line x1="${x}" y1="${topAxis}" x2="${x}" y2="${svgH}" stroke="#E0E0E0" stroke-width="1"/>`;
@@ -1485,8 +1638,13 @@ function renderGanttDiaSvg(fecha) {
     const filaIdx = b.fila === 'exterior' ? filas.length - 1 : filas.findIndex(f => f.tipo === 'seccion' && f.id === String(b.id_seccion));
     if (filaIdx < 0) return;
     const y = topAxis + filaIdx * (rowH + rowGap);
-    const x1 = px(Math.max(desde, (b.start - medianoche) / 60000));
-    const x2 = px(Math.min(hasta, (b.end - medianoche) / 60000));
+    // Acotado a ambos lados (no solo "al menos desde") para que un
+    // bloque 'exterior' que arranca o termina fuera del rango visible
+    // (p. ej. un permiso que empieza a las 23:00 con el rango cortado en
+    // las 22:00) no se dibuje corrido fuera del SVG: queda pegado al
+    // borde del gráfico en vez de desaparecer.
+    const x1 = px(Math.min(hasta, Math.max(desde, (b.start - medianoche) / 60000)));
+    const x2 = px(Math.max(desde, Math.min(hasta, (b.end - medianoche) / 60000)));
     const color = b.fila === 'exterior' ? COLOR_EXTERIOR : colorSeccion(b.id_seccion);
     const etiqueta = b.fila === 'exterior' ? motivoNombre(b.id_motivo) : '';
     const w = Math.max(2, x2 - x1);
@@ -1840,13 +1998,14 @@ async function init() {
     // hay un catalogo guardado de una sesion anterior, arrancamos con
     // ese (desactualizado, pero deja trabajar) en vez de dejar la
     // pantalla en blanco.
+    const msgInit = mensajeErrorConexion(err);
     const cacheado = localStorage.getItem(CATALOGOS_CACHE_KEY);
     if (cacheado) {
       catalogos = JSON.parse(cacheado);
-      toast('📶 Sin conexión: usando el catálogo de secciones/motivos guardado la última vez.');
+      toast('📶 ' + msgInit + ' Usando el catálogo guardado la última vez.');
     } else {
       document.getElementById('lista').innerHTML =
-        '<div id="empty">Sin conexión. Conectate a internet al menos una vez para poder usar el programa.</div>';
+        '<div id="empty">' + msgInit + ' Conectate al menos una vez para poder usar el programa.</div>';
       document.getElementById('header-sub').textContent = 'Sin conexión';
       iniciarMonitoreoOffline();
       return;
@@ -1945,6 +2104,20 @@ function iniciarMonitoreoOffline() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+// Si cambia el tamaño de la ventana (maximizar, achicar, otro monitor),
+// el Gantt se vuelve a dibujar con el ancho nuevo. Con un pequeño
+// debounce para no redibujar en cada pixel mientras se arrastra el
+// borde de la ventana.
+let resizeGanttTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeGanttTimer);
+  resizeGanttTimer = setTimeout(() => {
+    if (!document.getElementById('panel-gantt').classList.contains('tab-panel-hidden')) {
+      renderGanttDias();
+    }
+  }, 200);
+});
 
 // ── Latido ("sigo abierta") ──────────────────────────────────────────
 // Mientras esta pestaña exista, le avisa al servidor local cada 10s que
